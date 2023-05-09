@@ -1,0 +1,17 @@
+[package]
+name = "swim"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.28.0", features = ["full"] }
+async-trait = "0.1.68"
+
+[dev-dependencies]
+tokio-postgres = "0.7.8"
+
+[[example]]
+name = "tokio_postgres"
+path = "examples/tokio_postgres.rs"
