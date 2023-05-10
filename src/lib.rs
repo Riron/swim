@@ -14,10 +14,14 @@ pub trait Manager: Send + Sync + 'static {
 
     /// Attempts to create a new connection.
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error>;
-    /// Checks if the connection is closed.
-    /// The usual implementation checks if the underlying TCP socket has disconnected.
+    /// Checks if the connection is still open.
+    /// The usual implementation checks if the underlying TCP socket is still disconnected.
     /// This is called synchronously every time a connection is returned to the pool.
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool;
+    fn is_open(&self, conn: &mut Self::Connection) -> bool;
+    /// Checks if the connection is still valid.
+    /// This is an async check disabled by default.
+    /// Typically with a SQL DB, this would be something like `SELECT 1`
+    async fn is_valid(&self, conn: &mut Self::Connection) -> bool;
 }
 
 #[derive(Debug)]
@@ -64,18 +68,20 @@ impl<M: Manager> Deref for Connection<M> {
 pub struct PoolError;
 
 pub struct PoolConfig {
-    // Maximum number of connections managed by the pool
+    // Maximum number of connections managed by the pool. Defaults to 10.
     pub max_open: u16,
-    // Maximum idle connection count maintained by the pool
+    // Maximum idle connection count maintained by the pool. Defaults to None.
     pub max_idle: Option<u16>,
-    // Maximum lifetime of connections in the pool
+    // Maximum lifetime of connections in the pool. Defaults to None.
     pub max_lifetime: Option<Duration>,
-    // Maximum lifetime of idle connections in the pool
+    // Maximum lifetime of idle connections in the pool. Defaults to 5min.
     pub idle_timeout: Option<Duration>,
-    // Maximum time to wait for a connection to become available before returning an error
-    pub get_timeout: Duration,
-    // Rate at which a connection cleanup is scheduled
+    // Rate at which a connection cleanup is scheduled. Defaults to 60sec.
     pub cleanup_rate: Duration,
+    // Check the connection before returning it to the client. Defaults to false.
+    pub test_on_check_out: bool,
+    // Maximum time to wait for a connection to become available before returning an error. Defaults to 30sec.
+    pub get_timeout: Duration,
 }
 
 impl Default for PoolConfig {
@@ -85,8 +91,9 @@ impl Default for PoolConfig {
             max_idle: None,
             max_lifetime: None,
             idle_timeout: Some(Duration::from_secs(5 * 60)),
-            get_timeout: Duration::from_secs(30),
             cleanup_rate: Duration::from_secs(60),
+            test_on_check_out: false,
+            get_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -134,6 +141,8 @@ pub struct PoolConfigBackend {
     pub idle_timeout: Option<Duration>,
     // Rate at which a connection cleanup is scheduled
     pub cleanup_rate: Duration,
+    // Check the connection before returning it to the client. Defaults to false.
+    pub test_on_check_out: bool,
 }
 
 type GetConnectionCmd<M> = oneshot::Sender<Option<Connection<M>>>;
@@ -180,13 +189,16 @@ impl<M: Manager> PoolBackend<M> {
         let (recycle_tx, mut recycle_rx) = mpsc::unbounded_channel();
 
         // Channel to run idle connections cleanup loops
-        // A cleanup event is queued every `cleanup_rate`
+        // If there is a `max_lifetime` or `idle_timeout` param, we schedule the first cleanup.
+        // Cleanup then schedules itself after waiting for `cleanup_rate`.
         let (clean_tx, mut clean_rx) = mpsc::channel(1);
         let initial_clean_tx = clean_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(self.config.cleanup_rate).await;
-            initial_clean_tx.send(()).await
-        });
+        if self.config.max_lifetime.is_some() || self.config.idle_timeout.is_some() {
+            tokio::spawn(async move {
+                tokio::time::sleep(self.config.cleanup_rate).await;
+                initial_clean_tx.send(()).await
+            });
+        }
 
         loop {
             select! {
@@ -201,7 +213,9 @@ impl<M: Manager> PoolBackend<M> {
                         let mut connection  = self.idles.swap_remove(0);
                         connection.last_used_at = Instant::now();
 
-                        if connection.raw.is_some() && !manager.is_closed(connection.raw.as_mut().unwrap()) {
+                        let is_open = manager.is_open(connection.raw.as_mut().unwrap());
+                        let is_valid = !self.config.test_on_check_out || manager.is_valid(connection.raw.as_mut().unwrap()).await;
+                        if is_open && is_valid {
                             result = Some(connection);
                         }
                     }
@@ -226,17 +240,15 @@ impl<M: Manager> PoolBackend<M> {
 
                 },
                 // When a connection is droped, if it's max_lifetime & idle_timeout are still valid, we recycle it to the idle connection pool
-                Some(conn) = recycle_rx.recv() => {
+                Some(mut conn) = recycle_rx.recv() => {
 
                     let now = Instant::now();
-                    let time_since_conn_creation = now.duration_since(conn.created_at);
-                    let time_since_conn_idle = now.duration_since(conn.last_used_at);
 
-                    let is_max_lifetime_ok = self.config.max_lifetime.is_none() || time_since_conn_creation < self.config.max_lifetime.unwrap();
-                    let is_idle_timeout_ok = self.config.idle_timeout.is_none() || time_since_conn_idle < self.config.idle_timeout.unwrap();
+                    let is_max_lifetime_ok = self.config.max_lifetime.is_none() || now < conn.created_at + self.config.max_lifetime.unwrap();
+                    let is_idle_timeout_ok = self.config.idle_timeout.is_none() || now < conn.last_used_at + self.config.idle_timeout.unwrap();
                     let is_max_idle_ok = self.config.max_idle.is_none() || self.idles.len() < self.config.max_idle.unwrap().into();
 
-                    if is_max_lifetime_ok && is_max_idle_ok && is_idle_timeout_ok {
+                    if is_max_lifetime_ok && is_max_idle_ok && is_idle_timeout_ok && manager.is_open(&mut conn.raw) {
                         let connection = Connection {
                             raw: Some(conn.raw),
                             created_at: conn.created_at,
@@ -252,11 +264,11 @@ impl<M: Manager> PoolBackend<M> {
                 Some(_) = clean_rx.recv() => {
                     let now = Instant::now();
 
-                    self.idles.retain(|conn| {
-                        let is_lifetime_expired = conn.created_at + self.config.max_lifetime.unwrap_or(conn.created_at.elapsed()) < now;
-                        let is_idle_expired = conn.last_used_at + self.config.idle_timeout.unwrap_or(conn.last_used_at.elapsed()) < now;
+                    self.idles.retain_mut(|conn| {
+                        let is_max_lifetime_ok = self.config.max_lifetime.is_none() || now < conn.created_at + self.config.max_lifetime.unwrap();
+                        let is_idle_timeout_ok = self.config.idle_timeout.is_none() || now < conn.last_used_at + self.config.idle_timeout.unwrap();
 
-                        return !is_lifetime_expired && !is_idle_expired;
+                        return is_max_lifetime_ok && is_idle_timeout_ok && manager.is_open(conn.raw.as_mut().unwrap());
                     });
 
                     tokio::time::sleep(self.config.cleanup_rate).await;
@@ -291,6 +303,7 @@ impl<M: Manager> Pool<M> {
                 max_lifetime: config.max_lifetime,
                 max_open: config.max_open,
                 cleanup_rate: config.cleanup_rate,
+                test_on_check_out: config.test_on_check_out,
             },
             request_rx,
             stats_rx,

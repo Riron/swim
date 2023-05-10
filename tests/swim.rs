@@ -15,8 +15,11 @@ impl Manager for OkManager {
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         Ok(TestConnection(true))
     }
-    fn is_closed(&self, _: &mut Self::Connection) -> bool {
-        false
+    fn is_open(&self, _: &mut Self::Connection) -> bool {
+        true
+    }
+    async fn is_valid(&self, _: &mut Self::Connection) -> bool {
+        true
     }
 }
 

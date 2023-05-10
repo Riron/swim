@@ -39,8 +39,15 @@ where
         Ok(client)
     }
 
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
-        conn.is_closed()
+    fn is_open(&self, conn: &mut Self::Connection) -> bool {
+        !conn.is_closed()
+    }
+
+    async fn is_valid(&self, conn: &mut Self::Connection) -> bool {
+        match conn.simple_query("").await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
     }
 }
 
