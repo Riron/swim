@@ -15,6 +15,9 @@ impl Manager for OkManager {
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         Ok(TestConnection(true))
     }
+    fn is_closed(&self, _: &mut Self::Connection) -> bool {
+        false
+    }
 }
 
 #[tokio::test]

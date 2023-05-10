@@ -38,6 +38,10 @@ where
         tokio::spawn(conn);
         Ok(client)
     }
+
+    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+        conn.is_closed()
+    }
 }
 
 pub type PgPool = Pool<PgConnectionManager<NoTls>>;
@@ -46,12 +50,9 @@ pub type PgPool = Pool<PgConnectionManager<NoTls>>;
 async fn main() {
     let config = Config::from_str("postgres://trackdechets:password@localhost:5432").unwrap();
     let manager = PgConnectionManager::new(config, NoTls);
-    let pool = Pool::new(
-        manager,
-        PoolConfig::default().max_open(90)
-    );
+    let pool = Pool::new(manager, PoolConfig::default().max_open(90));
 
-    const MAX: usize = 100000; //100000;
+    const MAX: usize = 100000;
 
     let now = Instant::now();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(16);

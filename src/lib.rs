@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use async_trait::async_trait;
 use tokio::select;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender, UnboundedReceiver};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration, Instant};
 
@@ -12,7 +12,12 @@ pub trait Manager: Send + Sync + 'static {
     type Connection: Send + Sync + 'static;
     type Error: Send + Sync + 'static;
 
+    /// Attempts to create a new connection.
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error>;
+    /// Checks if the connection is closed.
+    /// The usual implementation checks if the underlying TCP socket has disconnected.
+    /// This is called synchronously every time a connection is returned to the pool.
+    fn is_closed(&self, conn: &mut Self::Connection) -> bool;
 }
 
 #[derive(Debug)]
@@ -51,7 +56,7 @@ impl<M: Manager> Drop for Connection<M> {
 impl<M: Manager> Deref for Connection<M> {
     type Target = M::Connection;
     fn deref(&self) -> &Self::Target {
-        &self.raw.as_ref().unwrap()
+        self.raw.as_ref().unwrap()
     }
 }
 
@@ -171,9 +176,12 @@ impl<M: Manager> PoolBackend<M> {
     }
 
     async fn run(mut self, manager: M) {
+        // Channel to recycle connections
         let (recycle_tx, mut recycle_rx) = mpsc::unbounded_channel();
-        let (clean_tx, mut clean_rx) = mpsc::channel(1);
 
+        // Channel to run idle connections cleanup loops
+        // A cleanup event is queued every `cleanup_rate`
+        let (clean_tx, mut clean_rx) = mpsc::channel(1);
         let initial_clean_tx = clean_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(self.config.cleanup_rate).await;
@@ -183,9 +191,9 @@ impl<M: Manager> PoolBackend<M> {
         loop {
             select! {
                 // When a user asks for a connection:
-                // 1. If there is one available in the idle pool, we take it
-                // 2. Otherwise, if the creation limit hasn't been reached yet, we create a new one
-                // 3. Otherwise we return None
+                // 1. If there is one available in the idle pool, we return it
+                // 2. Otherwise, if the creation limit hasn't been reached yet, open a new connection and return it
+                // 3. If we have reached this stage, simply return None
                 Some(resp) = self.request_rx.recv() => {
                     let mut result = None;
 
@@ -193,10 +201,14 @@ impl<M: Manager> PoolBackend<M> {
                         let mut connection  = self.idles.swap_remove(0);
                         connection.last_used_at = Instant::now();
 
-                        result = Some(connection);
+                        if connection.raw.is_some() && !manager.is_closed(connection.raw.as_mut().unwrap()) {
+                            result = Some(connection);
+                        }
                     }
 
                     if self.nb_open_connections < self.config.max_open.into() {
+                        self.nb_open_connections += 1;
+
                         if let Ok(raw_connection) = manager.connect().await {
                             let connection = Connection {
                                 raw: Some(raw_connection),
@@ -204,7 +216,6 @@ impl<M: Manager> PoolBackend<M> {
                                 last_used_at: Instant::now(),
                                 recycle_tx: recycle_tx.clone(),
                             };
-                            self.nb_open_connections += 1;
                             result = Some(connection);
                         }
                     }
@@ -335,21 +346,19 @@ impl<M: Manager> Pool<M> {
         }
     }
 
-    pub async fn get(&self) -> Result<Connection<M>, String> {
+    pub async fn get(&self) -> Result<Connection<M>, tokio::time::error::Elapsed> {
         match timeout(self.get_timeout, async {
             loop {
                 if let Some(connection) = self.try_get().await {
                     return connection;
                 }
-                // Wait 5ms before retrying
-                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
         {
             Ok(result) => Ok(result),
-            Err(_) => {
-                return Err("Timeout, could not get a connection".to_owned());
+            Err(err) => {
+                return Err(err);
             }
         }
     }
