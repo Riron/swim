@@ -14,10 +14,12 @@ pub trait Manager: Send + Sync + 'static {
 
     /// Attempts to create a new connection.
     async fn connect(&self) -> std::result::Result<Self::Connection, Self::Error>;
+
     /// Checks if the connection is still open.
-    /// The usual implementation checks if the underlying TCP socket is still disconnected.
+    /// The usual implementation checks if the underlying TCP socket is still connected.
     /// This is called synchronously every time a connection is returned to the pool.
     fn is_open(&self, conn: &mut Self::Connection) -> bool;
+
     /// Checks if the connection is still valid.
     /// This is an async check disabled by default.
     /// Typically with a SQL DB, this would be something like `SELECT 1`
@@ -68,19 +70,19 @@ impl<M: Manager> Deref for Connection<M> {
 pub struct PoolError;
 
 pub struct PoolConfig {
-    // Maximum number of connections managed by the pool. Defaults to 10.
+    /// Maximum number of connections managed by the pool. Defaults to 10.
     pub max_open: u16,
-    // Maximum idle connection count maintained by the pool. Defaults to None.
+    /// Maximum idle connection count maintained by the pool. Defaults to None.
     pub max_idle: Option<u16>,
-    // Maximum lifetime of connections in the pool. Defaults to None.
+    /// Maximum lifetime of connections in the pool. Defaults to None.
     pub max_lifetime: Option<Duration>,
-    // Maximum lifetime of idle connections in the pool. Defaults to 5min.
+    /// Maximum lifetime of idle connections in the pool. Defaults to 5min.
     pub idle_timeout: Option<Duration>,
-    // Rate at which a connection cleanup is scheduled. Defaults to 60sec.
+    /// Rate at which a connection cleanup is scheduled. Defaults to 60sec.
     pub cleanup_rate: Duration,
-    // Check the connection before returning it to the client. Defaults to false.
+    /// Check the connection before returning it to the client. Defaults to false.
     pub test_on_check_out: bool,
-    // Maximum time to wait for a connection to become available before returning an error. Defaults to 30sec.
+    /// Maximum time to wait for a connection to become available before returning an error. Defaults to 30sec.
     pub get_timeout: Duration,
 }
 
@@ -131,17 +133,17 @@ impl PoolConfig {
 }
 
 pub struct PoolConfigBackend {
-    // Maximum number of connections managed by the pool
+    /// Maximum number of connections managed by the pool
     pub max_open: u16,
-    // Maximum idle connection count maintained by the pool
+    /// Maximum idle connection count maintained by the pool
     pub max_idle: Option<u16>,
-    // Maximum lifetime of connections in the pool
+    /// Maximum lifetime of connections in the pool
     pub max_lifetime: Option<Duration>,
-    // Maximum lifetime of idle connections in the pool
+    /// Maximum lifetime of idle connections in the pool
     pub idle_timeout: Option<Duration>,
-    // Rate at which a connection cleanup is scheduled
+    /// Rate at which a connection cleanup is scheduled
     pub cleanup_rate: Duration,
-    // Check the connection before returning it to the client. Defaults to false.
+    /// Check the connection before returning it to the client. Defaults to false.
     pub test_on_check_out: bool,
 }
 
