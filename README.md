@@ -1,8 +1,10 @@
 # Swim
 
-A generic connection pool with async/await support.
+A generic connection pool with [Tokio](https://tokio.rs/) support.
 
 Inspired by [a Mobc rewrite that never happened](https://github.com/importcjj/mobc/pull/60#issuecomment-879616110).
+
+This connection pool is **lock free** and uses a **single-thread event loop** instead. It seems to have a much better performance.
 
 # Example
 
